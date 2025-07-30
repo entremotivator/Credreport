@@ -4,14 +4,25 @@ import requests
 import os
 import tempfile
 import PyPDF2
-from io import BytesIO
+from io import BytesIO, StringIO
 from datetime import datetime, date
 import json
-import random
+import pandas as pd
+import csv
+import gspread
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+import base64
 
 st.set_page_config(page_title="📊 Credit Report System", layout="wide")
 
-# Demo Profiles Data
+# Google Sheets Configuration
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+]
+
+# Demo Profiles Data (keeping the same comprehensive profiles from before)
 DEMO_PROFILES = {
     "john.doe@example.com": {
         "role": "client",
@@ -151,6 +162,194 @@ if "n8n_webhook_url" not in st.session_state:
     st.session_state.n8n_webhook_url = "https://your-n8n-webhook-url.com/webhook"
 if "current_profile" not in st.session_state:
     st.session_state.current_profile = None
+if "gsheets_connected" not in st.session_state:
+    st.session_state.gsheets_connected = False
+if "spreadsheet_id" not in st.session_state:
+    st.session_state.spreadsheet_id = ""
+
+# Google Sheets Functions
+def setup_google_sheets_connection(service_account_json):
+    """Setup Google Sheets connection using service account credentials"""
+    try:
+        # Parse the JSON credentials
+        creds_dict = json.loads(service_account_json)
+        
+        # Create credentials object
+        credentials = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+        
+        # Initialize the gspread client
+        gc = gspread.authorize(credentials)
+        
+        return gc, True, "✅ Google Sheets connection established successfully!"
+    except Exception as e:
+        return None, False, f"❌ Error connecting to Google Sheets: {str(e)}"
+
+def create_comprehensive_dataframe(reports_data):
+    """Create a comprehensive DataFrame from reports data"""
+    rows = []
+    
+    for report_key, report in reports_data.items():
+        if report.get('type') == 'generated':
+            # Extract all the detailed information
+            row = {
+                'Report_ID': report_key,
+                'Client_Name': report.get('name', ''),
+                'Email': report.get('email', ''),
+                'Generated_Date': report.get('generated_date', ''),
+                'Credit_Score': report.get('credit_score', ''),
+                'Report_Type': report.get('type', ''),
+                
+                # Personal Information
+                'SSN': report.get('ssn', ''),
+                'Date_of_Birth': report.get('dob', ''),
+                'Address': report.get('address', ''),
+                'Phone': report.get('phone', ''),
+                'Employment': report.get('employment', ''),
+                'Annual_Income': report.get('annual_income', ''),
+                
+                # Credit Details (if available from current profile)
+                'Payment_History': '',
+                'Credit_Utilization': '',
+                'Credit_Inquiries': '',
+                'Public_Records': '',
+                'Collections': '',
+                'Bankruptcies': '',
+                'Account_Age': '',
+                'Open_Accounts': '',
+                'Closed_Accounts': '',
+                'Derogatory_Marks': '',
+                'Total_Debt': '',
+                'Monthly_Payments': '',
+                'High_Balance_Account': '',
+                'Recent_Activity': '',
+                'Account_Types': '',
+                'Credit_Limits': '',
+                'Charge_Offs': '',
+                'Late_Payments': '',
+                'Loan_Types': '',
+                'Student_Loans': '',
+                'Auto_Loans': '',
+                'Mortgage_Info': '',
+                'Revolving_Accounts': '',
+                'Installment_Loans': '',
+                'Hard_Inquiries': '',
+                'Soft_Inquiries': '',
+                'Credit_Score_History': '',
+                'Employment_Status': '',
+                'Income_Info': '',
+                'Additional_Notes': '',
+                
+                # Risk Assessment
+                'Risk_Level': get_risk_level(report.get('credit_score', 0)),
+                'DTI_Ratio': extract_dti_ratio(report),
+                'Utilization_Ratio': extract_utilization_ratio(report),
+                'Payment_Performance': get_payment_performance(report.get('credit_score', 0)),
+                'Recommendation': get_recommendation(report.get('credit_score', 0))
+            }
+            
+            # If we have detailed credit data, add it
+            if st.session_state.current_profile and st.session_state.current_profile.get('email') == report.get('email'):
+                credit_data = st.session_state.current_profile.get('credit_data', {})
+                for key, value in credit_data.items():
+                    formatted_key = key.replace('_', ' ').title().replace(' ', '_')
+                    if formatted_key in row:
+                        row[formatted_key] = str(value)[:500]  # Limit length for CSV
+            
+            rows.append(row)
+    
+    return pd.DataFrame(rows)
+
+def get_risk_level(credit_score):
+    """Determine risk level based on credit score"""
+    if credit_score >= 800:
+        return "Excellent - Very Low Risk"
+    elif credit_score >= 740:
+        return "Very Good - Low Risk"
+    elif credit_score >= 670:
+        return "Good - Moderate Risk"
+    elif credit_score >= 580:
+        return "Fair - High Risk"
+    else:
+        return "Poor - Very High Risk"
+
+def extract_dti_ratio(report):
+    """Extract DTI ratio from report data"""
+    # This would be extracted from the detailed credit data
+    return "N/A"
+
+def extract_utilization_ratio(report):
+    """Extract utilization ratio from report data"""
+    # This would be extracted from the detailed credit data
+    return "N/A"
+
+def get_payment_performance(credit_score):
+    """Determine payment performance based on credit score"""
+    if credit_score >= 800:
+        return "Excellent"
+    elif credit_score >= 740:
+        return "Very Good"
+    elif credit_score >= 670:
+        return "Good"
+    elif credit_score >= 580:
+        return "Fair"
+    else:
+        return "Poor"
+
+def get_recommendation(credit_score):
+    """Get recommendation based on credit score"""
+    if credit_score >= 800:
+        return "Maintain excellent credit habits. Consider premium credit products."
+    elif credit_score >= 740:
+        return "Continue good credit management. Eligible for competitive rates."
+    elif credit_score >= 670:
+        return "Focus on reducing utilization and maintaining on-time payments."
+    elif credit_score >= 580:
+        return "Work on payment history and debt reduction. Consider secured cards."
+    else:
+        return "Immediate credit repair needed. Consider credit counseling."
+
+def export_to_google_sheets(gc, spreadsheet_id, df, worksheet_name="Credit_Reports"):
+    """Export DataFrame to Google Sheets"""
+    try:
+        # Open the spreadsheet
+        spreadsheet = gc.open_by_key(spreadsheet_id)
+        
+        # Try to get existing worksheet or create new one
+        try:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+            worksheet.clear()  # Clear existing data
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=50)
+        
+        # Convert DataFrame to list of lists
+        data = [df.columns.tolist()] + df.values.tolist()
+        
+        # Update the worksheet
+        worksheet.update('A1', data)
+        
+        # Format headers
+        worksheet.format('A1:AZ1', {
+            'backgroundColor': {'red': 0.2, 'green': 0.6, 'blue': 0.9},
+            'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}}
+        })
+        
+        return True, f"✅ Data exported to Google Sheets successfully! Worksheet: {worksheet_name}"
+    except Exception as e:
+        return False, f"❌ Error exporting to Google Sheets: {str(e)}"
+
+def import_from_google_sheets(gc, spreadsheet_id, worksheet_name="Credit_Reports"):
+    """Import data from Google Sheets"""
+    try:
+        spreadsheet = gc.open_by_key(spreadsheet_id)
+        worksheet = spreadsheet.worksheet(worksheet_name)
+        
+        # Get all records
+        records = worksheet.get_all_records()
+        df = pd.DataFrame(records)
+        
+        return df, True, f"✅ Data imported from Google Sheets successfully! {len(df)} records loaded."
+    except Exception as e:
+        return pd.DataFrame(), False, f"❌ Error importing from Google Sheets: {str(e)}"
 
 # Sidebar Configuration
 st.sidebar.title("🔐 User Login")
@@ -184,6 +383,45 @@ else:
     user_role = st.sidebar.selectbox("Select your role", ["client", "admin"])
     user_email = st.sidebar.text_input("Your Email", value="client@example.com")
     st.session_state.current_profile = None
+
+st.sidebar.markdown("---")
+
+# Google Sheets Configuration
+st.sidebar.subheader("📊 Google Sheets Integration")
+
+# Service Account JSON input
+service_account_json = st.sidebar.text_area(
+    "Service Account JSON",
+    height=100,
+    help="Paste your Google Service Account JSON credentials here",
+    placeholder='{"type": "service_account", "project_id": "your-project"...}'
+)
+
+# Spreadsheet ID input
+spreadsheet_id = st.sidebar.text_input(
+    "Google Spreadsheet ID",
+    value=st.session_state.spreadsheet_id,
+    help="Enter the ID of your Google Spreadsheet (found in the URL)"
+)
+
+if st.sidebar.button("🔗 Connect to Google Sheets"):
+    if service_account_json and spreadsheet_id:
+        gc, success, message = setup_google_sheets_connection(service_account_json)
+        if success:
+            st.session_state.gsheets_connected = True
+            st.session_state.gc = gc
+            st.session_state.spreadsheet_id = spreadsheet_id
+            st.sidebar.success(message)
+        else:
+            st.sidebar.error(message)
+    else:
+        st.sidebar.error("Please provide both Service Account JSON and Spreadsheet ID")
+
+# Show connection status
+if st.session_state.gsheets_connected:
+    st.sidebar.success("🟢 Google Sheets Connected")
+else:
+    st.sidebar.warning("🟡 Google Sheets Not Connected")
 
 st.sidebar.markdown("---")
 
@@ -400,7 +638,7 @@ with st.form("credit_report_form"):
     
     submitted = st.form_submit_button("🚀 Generate Credit Report", use_container_width=True)
 
-# Generate PDF function
+# Generate PDF function (keeping the same as before)
 def generate_pdf():
     pdf = FPDF()
     pdf.add_page()
@@ -490,7 +728,7 @@ def generate_pdf():
     pdf.output(filename)
     return filename
 
-# Webhook function
+# Webhook function (keeping the same as before)
 def send_to_n8n(filepath, webhook_url, metadata):
     try:
         with open(filepath, "rb") as f:
@@ -512,15 +750,54 @@ if submitted and name:
     with st.spinner("🔄 Generating comprehensive credit report..."):
         file_path = generate_pdf()
         
-        # Store for CRM view
-        st.session_state.reports[user_email] = {
+        # Store for CRM view with all form data
+        report_data = {
             "name": name,
             "file": file_path,
             "email": user_email,
             "type": "generated",
             "credit_score": credit_score,
-            "generated_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "generated_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "ssn": ssn,
+            "dob": str(dob),
+            "address": address,
+            "phone": st.session_state.current_profile.get("phone", "") if st.session_state.current_profile else "",
+            "employment": st.session_state.current_profile.get("employment", "") if st.session_state.current_profile else "",
+            "annual_income": st.session_state.current_profile.get("annual_income", "") if st.session_state.current_profile else "",
+            # Store all credit report fields
+            "payment_history": payment_history,
+            "credit_utilization": credit_utilization,
+            "inquiries": inquiries,
+            "public_records": public_records,
+            "collections": collections,
+            "bankruptcies": bankruptcies,
+            "account_age": account_age,
+            "open_accounts": open_accounts,
+            "closed_accounts": closed_accounts,
+            "derogatory_marks": derogatory_marks,
+            "total_debt": total_debt,
+            "monthly_payments": monthly_payments,
+            "high_balance": high_balance,
+            "recent_activity": recent_activity,
+            "account_types": account_types,
+            "credit_limits": credit_limits,
+            "charge_offs": charge_offs,
+            "late_payments": late_payments,
+            "loan_types": loan_types,
+            "student_loans": student_loans,
+            "auto_loans": auto_loans,
+            "mortgage_info": mortgage_info,
+            "revolving_accounts": revolving_accounts,
+            "installment_loans": installment_loans,
+            "hard_inquiries": hard_inquiries,
+            "soft_inquiries": soft_inquiries,
+            "credit_score_history": credit_score_history,
+            "employment_status": employment_status,
+            "income_info": income_info,
+            "notes": notes
         }
+        
+        st.session_state.reports[user_email] = report_data
         
         # Send to n8n
         status = send_to_n8n(
@@ -536,7 +813,109 @@ if submitted and name:
             st.error(f"❌ Failed to send report to webhook. Status: {status}")
             st.warning("Report was generated but not sent to n8n. Check webhook configuration.")
 
-# CRM Dashboard
+# Data Export/Import Section
+st.markdown("---")
+st.title("📊 Data Management & Export")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("📤 Export Options")
+    
+    if st.session_state.reports:
+        # Create comprehensive DataFrame
+        df = create_comprehensive_dataframe(st.session_state.reports)
+        
+        # CSV Export
+        csv_buffer = StringIO()
+        df.to_csv(csv_buffer, index=False)
+        csv_data = csv_buffer.getvalue()
+        
+        st.download_button(
+            label="📥 Download Comprehensive CSV Report",
+            data=csv_data,
+            file_name=f"credit_reports_comprehensive_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        
+        # Show preview of data
+        with st.expander("👁️ Preview Export Data"):
+            st.dataframe(df.head(), use_container_width=True)
+            st.write(f"**Total Records:** {len(df)}")
+            st.write(f"**Total Columns:** {len(df.columns)}")
+        
+        # Google Sheets Export
+        if st.session_state.gsheets_connected:
+            if st.button("📊 Export to Google Sheets", use_container_width=True):
+                with st.spinner("Exporting to Google Sheets..."):
+                    success, message = export_to_google_sheets(
+                        st.session_state.gc, 
+                        st.session_state.spreadsheet_id, 
+                        df
+                    )
+                    if success:
+                        st.success(message)
+                        st.info(f"🔗 View your data: https://docs.google.com/spreadsheets/d/{st.session_state.spreadsheet_id}")
+                    else:
+                        st.error(message)
+        else:
+            st.info("Connect to Google Sheets to enable live export")
+    else:
+        st.info("No reports available for export")
+
+with col2:
+    st.subheader("📥 Import Options")
+    
+    # CSV Import
+    imported_csv = st.file_uploader(
+        "Upload CSV File",
+        type=['csv'],
+        help="Import credit report data from CSV file"
+    )
+    
+    if imported_csv is not None:
+        try:
+            imported_df = pd.read_csv(imported_csv)
+            st.success(f"✅ CSV imported successfully! {len(imported_df)} records found.")
+            
+            with st.expander("👁️ Preview Imported Data"):
+                st.dataframe(imported_df.head(), use_container_width=True)
+            
+            if st.button("📊 Process Imported Data"):
+                # Process imported data and add to session state
+                for _, row in imported_df.iterrows():
+                    if pd.notna(row.get('Email')):
+                        st.session_state.reports[f"imported_{row['Email']}_{datetime.now().timestamp()}"] = {
+                            "name": row.get('Client_Name', ''),
+                            "email": row.get('Email', ''),
+                            "type": "imported",
+                            "credit_score": row.get('Credit_Score', 0),
+                            "generated_date": row.get('Generated_Date', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                        }
+                st.success(f"✅ {len(imported_df)} records processed and added to system!")
+                st.rerun()
+        except Exception as e:
+            st.error(f"Error importing CSV: {str(e)}")
+    
+    # Google Sheets Import
+    if st.session_state.gsheets_connected:
+        if st.button("📊 Import from Google Sheets", use_container_width=True):
+            with st.spinner("Importing from Google Sheets..."):
+                imported_df, success, message = import_from_google_sheets(
+                    st.session_state.gc, 
+                    st.session_state.spreadsheet_id
+                )
+                if success and not imported_df.empty:
+                    st.success(message)
+                    with st.expander("👁️ Preview Imported Data"):
+                        st.dataframe(imported_df.head(), use_container_width=True)
+                else:
+                    st.error(message)
+    else:
+        st.info("Connect to Google Sheets to enable live import")
+
+# CRM Dashboard (keeping the same enhanced dashboard from before)
 st.markdown("---")
 st.title("📁 Credit Report Dashboard")
 
@@ -555,7 +934,8 @@ if user_role == "admin":
             uploaded_count = sum(1 for r in st.session_state.reports.values() if r.get('type') == 'uploaded')
             st.metric("Uploaded Reports", uploaded_count)
         with col4:
-            avg_score = sum(r.get('credit_score', 0) for r in st.session_state.reports.values() if r.get('credit_score')) / max(1, len([r for r in st.session_state.reports.values() if r.get('credit_score')]))
+            scores = [r.get('credit_score', 0) for r in st.session_state.reports.values() if r.get('credit_score')]
+            avg_score = sum(scores) / max(1, len(scores)) if scores else 0
             st.metric("Avg Credit Score", f"{avg_score:.0f}")
     
     st.markdown("---")
@@ -639,18 +1019,18 @@ with col1:
     st.markdown("- Automatic file organization")
 
 with col2:
-    st.markdown("**🔗 n8n Integration**")
-    st.markdown("- Configure webhook URL in sidebar")
-    st.markdown("- Test connection before sending")
-    st.markdown("- Automatic file transmission")
-    st.markdown("- Status monitoring and feedback")
+    st.markdown("**📊 Data Export/Import**")
+    st.markdown("- Comprehensive CSV export with 40+ fields")
+    st.markdown("- Live Google Sheets integration")
+    st.markdown("- Import existing data from CSV")
+    st.markdown("- Real-time data synchronization")
 
 with col3:
-    st.markdown("**👥 Demo Profiles**")
-    st.markdown("- **John Doe**: Excellent credit (742)")
-    st.markdown("- **Sarah Johnson**: Fair credit (680)")
-    st.markdown("- **Michael Chen**: Exceptional credit (820)")
-    st.markdown("- Complete credit histories included")
+    st.markdown("**🔗 Integration Features**")
+    st.markdown("- n8n webhook automation")
+    st.markdown("- Google Sheets live data")
+    st.markdown("- Risk assessment analytics")
+    st.markdown("- Professional PDF reports")
 
 st.markdown("---")
-st.markdown("**🔒 Credit Report System v2.0** - Comprehensive credit analysis and reporting platform")
+st.markdown("**🔒 Credit Report System v3.0** - Comprehensive credit analysis with advanced data management")

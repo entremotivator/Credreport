@@ -2,3 +2,4 @@ streamlit
 fpdf
 requests
 PyPDF2
+gspread

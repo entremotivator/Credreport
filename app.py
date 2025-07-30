@@ -353,7 +353,7 @@ def display_login_page():
             if st.form_submit_button("Login"):
                 if authenticate_user(email, password):
                     st.success(f"Logged in as {st.session_state['user_role']}")
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.error("Invalid email or password")
         with col2:
